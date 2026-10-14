@@ -1,0 +1,72 @@
+name: Build COPG v7.5.1 OpenSource Module
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract package if uploaded as ZIP
+        run: |
+          if [ -f "COPG-v7.5.1-ReadyToBuild-Package.zip" ]; then
+            unzip -o "COPG-v7.5.1-ReadyToBuild-Package.zip"
+          fi
+
+      - name: Compile Android NDK Binaries & Package Flashable ZIP
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TOOLCHAIN="$(find "$NDK/toolchains/llvm/prebuilt" -maxdepth 1 -mindepth 1 -type d | head -n 1)/bin"
+          STAGE=".build/module"
+          mkdir -p "$STAGE/zygisk" dist
+
+          cp -r module/* "$STAGE/"
+          cp -r webroot "$STAGE/"
+
+          # 编译 arm64-v8a / armeabi-v7a / x86_64 Zygisk 核心库
+          "$TOOLCHAIN/aarch64-linux-android29-clang++" -std=c++17 -shared -fPIC -static-libstdc++ -Os -flto \
+            -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+            -I src/include src/spoof_module.cpp src/atexit.cpp -llog \
+            -o "$STAGE/zygisk/arm64-v8a.so"
+
+          "$TOOLCHAIN/armv7a-linux-androideabi29-clang++" -std=c++17 -shared -fPIC -static-libstdc++ -Os -flto \
+            -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+            -I src/include src/spoof_module.cpp src/atexit.cpp -llog \
+            -o "$STAGE/zygisk/armeabi-v7a.so"
+
+          "$TOOLCHAIN/x86_64-linux-android29-clang++" -std=c++17 -shared -fPIC -static-libstdc++ -Os -flto \
+            -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--exclude-libs,ALL \
+            -I src/include src/spoof_module.cpp src/atexit.cpp -llog \
+            -o "$STAGE/zygisk/x86_64.so"
+
+          # 编译后台守护进程 controller
+          "$TOOLCHAIN/aarch64-linux-android29-clang++" -std=c++17 -O3 -Os -fPIE -pie -static-libstdc++ \
+            -fdata-sections -ffunction-sections -Wl,--gc-sections \
+            -I src/include src/unified_controller.cpp \
+            -o "$STAGE/controller"
+          chmod 0755 "$STAGE/controller"
+
+          # 打包成最终可刷入的模块 ZIP
+          (cd "$STAGE" && zip -r9 "$GITHUB_WORKSPACE/dist/COPG-v7.5.1-OpenSource.zip" .)
+
+      - name: Upload to Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: COPG-v7.5.1-OpenSource-Artifact
+          path: dist/COPG-v7.5.1-OpenSource.zip
+
+      - name: Publish Ready-to-Flash ZIP to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v7.5.1-open --yes --cleanup-tag 2>/dev/null || true
+          gh release create v7.5.1-open dist/COPG-v7.5.1-OpenSource.zip \
+            --title "COPG v7.5.1 OpenSource (Unrestricted)" \
+            --notes "Ready-to-flash Magisk / KernelSU / APatch module."
